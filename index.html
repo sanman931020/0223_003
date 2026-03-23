@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>03-02 顏色追蹤</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+    <style>body { font-family: Inter, sans-serif; }</style>
+  </head>
+  <body class="min-h-screen bg-slate-950 p-6 text-slate-100">
+    <a class="text-cyan-400 hover:text-lime-400" href="index.html">← 返回課程表</a>
+    <div class="mx-auto mt-6 max-w-3xl">
+      <h1 class="mb-4 text-xl font-semibold">練習 03-02｜圓形顏色追蹤</h1>
+      <p class="mb-2 text-sm text-slate-400">
+        藍色圓：追蹤顯示；紅色圓：開/關音樂；黃色：音量大小。
+      </p>
+      <button id="start" class="mb-4 rounded-xl border border-cyan-400/50 bg-cyan-500/10 px-4 py-2 text-sm text-cyan-200">
+        開啟攝影機
+      </button>
+      <div class="relative inline-block">
+        <video id="video" class="hidden" playsinline muted></video>
+        <canvas id="canvas" class="max-h-[70vh] rounded-lg border border-cyan-500/30 bg-black"></canvas>
+      </div>
+      <p id="status" class="mt-4 rounded-lg border border-slate-700 bg-slate-900/80 p-3 text-sm text-slate-300">
+        尚未偵測到藍色圓｜音樂：已停止
+      </p>
+    </div>
+    <script>
+      // 你可以依照實際拍攝顏色微調這三組目標 RGB。
+      const TARGET_BLUE = { r: 30, g: 180, b: 255 }; // 亮藍
+      const TARGET_RED = { r: 255, g: 0, b: 0 }; // 紅
+      const TARGET_YELLOW = { r: 255, g: 255, b: 0 }; // 黃
+      // 容差越大越容易偵測到（但也越可能誤判）。
+      const DIST_MAX_BLUE = 60;
+      const DIST_MAX_RED = 120;
+      const DIST_MAX_YELLOW = 120;
+
+      // 偵測到多少像素才算「有顏色圓」；紅/黃通常比較難所以門檻可稍低。
+      const MIN_BLUE_PIXELS = 300;
+      const MIN_RED_PIXELS = 180;
+      const video = document.getElementById("video");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      const statusEl = document.getElementById("status");
+      let wasBlueFound = false;
+      let wasRedFound = false;
+      let isMusicPlaying = false;
+      let audioCtx;
+      let osc;
+      let gainNode;
+      let melodyTimer;
+      let noteIndex = 0;
+      const melody = [262, 330, 392, 523, 392, 330];
+      let lastYellowRatio = 0;
+
+      function euclideanRGB(r, g, b, t) {
+        return Math.sqrt((r - t.r) ** 2 + (g - t.g) ** 2 + (b - t.b) ** 2);
+      }
+
+      function initAudio() {
+        if (audioCtx) return;
+        audioCtx = new AudioContext();
+        osc = audioCtx.createOscillator();
+        gainNode = audioCtx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = melody[0];
+        gainNode.gain.value = 0;
+        osc.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        osc.start();
+      }
+
+      function startMusic() {
+        if (isMusicPlaying) return;
+        initAudio();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+        isMusicPlaying = true;
+        updateVolumeByYellowRatio(lastYellowRatio);
+        melodyTimer = setInterval(() => {
+          noteIndex = (noteIndex + 1) % melody.length;
+          osc.frequency.setTargetAtTime(melody[noteIndex], audioCtx.currentTime, 0.01);
+        }, 240);
+      }
+
+      function stopMusic() {
+        if (!isMusicPlaying || !audioCtx) return;
+        isMusicPlaying = false;
+        clearInterval(melodyTimer);
+        melodyTimer = null;
+        gainNode.gain.setTargetAtTime(0, audioCtx.currentTime, 0.02);
+      }
+
+      function toggleMusic() {
+        if (isMusicPlaying) stopMusic();
+        else startMusic();
+      }
+
+      function updateVolumeByYellowRatio(ratio) {
+        if (!audioCtx || !gainNode) return;
+        const clamped = Math.min(1, Math.max(0, ratio));
+        const minGain = 0.01;
+        const maxGain = 0.2;
+        const targetGain = minGain + (maxGain - minGain) * clamped;
+        gainNode.gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.06);
+      }
+
+      function loop() {
+        if (video.videoWidth) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const d = img.data;
+          let sumXBlue = 0,
+            sumYBlue = 0,
+            countBlue = 0,
+            minXBlue = canvas.width,
+            minYBlue = canvas.height,
+            maxXBlue = 0,
+            maxYBlue = 0;
+          let countRed = 0;
+          let countYellow = 0;
+
+          for (let y = 0; y < canvas.height; y++) {
+            for (let x = 0; x < canvas.width; x++) {
+              const idx = (y * canvas.width + x) * 4;
+              const r = d[idx];
+              const g = d[idx + 1];
+              const b = d[idx + 2];
+              if (euclideanRGB(r, g, b, TARGET_BLUE) < DIST_MAX_BLUE) {
+                sumXBlue += x;
+                sumYBlue += y;
+                countBlue++;
+                if (x < minXBlue) minXBlue = x;
+                if (y < minYBlue) minYBlue = y;
+                if (x > maxXBlue) maxXBlue = x;
+                if (y > maxYBlue) maxYBlue = y;
+              }
+              if (euclideanRGB(r, g, b, TARGET_RED) < DIST_MAX_RED) countRed++;
+              if (euclideanRGB(r, g, b, TARGET_YELLOW) < DIST_MAX_YELLOW) countYellow++;
+            }
+          }
+
+          const totalPixels = canvas.width * canvas.height;
+          const foundBlue = countBlue > MIN_BLUE_PIXELS;
+          const foundRed = countRed > MIN_RED_PIXELS;
+          const blueRatio = countBlue / totalPixels;
+          const redRatio = countRed / totalPixels;
+          const yellowRatio = countYellow / totalPixels;
+          lastYellowRatio = yellowRatio;
+          statusEl.className =
+            "mt-4 rounded-lg border p-3 text-sm " +
+            (foundBlue
+              ? "border-lime-400/60 bg-lime-950/50 text-lime-200"
+              : "border-slate-700 bg-slate-900/80 text-slate-300");
+
+          updateVolumeByYellowRatio(yellowRatio);
+
+          // 紅色代表開/關：紅色出現 => 播放；紅色消失 => 停止
+          if (foundRed && !wasRedFound) startMusic();
+          if (!foundRed && wasRedFound) stopMusic();
+          wasRedFound = foundRed;
+          wasBlueFound = foundBlue;
+
+          if (foundBlue) {
+            const cx = sumXBlue / countBlue;
+            const cy = sumYBlue / countBlue;
+            const w = maxXBlue - minXBlue;
+            const h = maxYBlue - minYBlue;
+            const radius = Math.max(20, Math.max(w, h) / 2);
+
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+            ctx.strokeStyle = "rgba(34, 211, 238, 0.95)";
+            ctx.lineWidth = 4;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(132, 204, 22, 0.95)";
+            ctx.fill();
+
+            statusEl.textContent =
+              "偵測到藍色圓！ 中心點：(" +
+              cx.toFixed(0) +
+              ", " +
+              cy.toFixed(0) +
+              ")　半徑約：" +
+              radius.toFixed(0) +
+              " px｜音樂：" +
+              (isMusicPlaying ? "播放中" : "已停止") +
+              "｜藍:" +
+              (blueRatio * 100).toFixed(1) +
+              "%｜紅:" +
+              (redRatio * 100).toFixed(1) +
+              "%｜黃:" +
+              (yellowRatio * 100).toFixed(1) +
+              "%";
+          } else {
+            statusEl.textContent =
+              "尚未偵測到藍色圓｜音樂：" +
+              (isMusicPlaying ? "播放中" : "已停止") +
+              "｜藍:" +
+              (blueRatio * 100).toFixed(1) +
+              "%｜紅:" +
+              (redRatio * 100).toFixed(1) +
+              "%｜黃:" +
+              (yellowRatio * 100).toFixed(1) +
+              "%";
+          }
+        }
+        requestAnimationFrame(loop);
+      }
+
+      document.getElementById("start").addEventListener("click", async () => {
+        initAudio();
+        if (audioCtx.state === "suspended") await audioCtx.resume();
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } });
+        video.srcObject = stream;
+        await video.play();
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        loop();
+      });
+    </script>
+  </body>
+</html>
